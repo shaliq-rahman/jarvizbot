@@ -40,29 +40,57 @@ def get_db_connection():
     
     # Force IPv4 by resolving hostname to IPv4 address only
     import socket
+    import ipaddress
+    
+    host_ip = PGHOST
     try:
-        # Get IPv4 address only (AF_INET = IPv4)
-        addr_info = socket.getaddrinfo(PGHOST, PGPORT, socket.AF_INET, socket.SOCK_STREAM)
-        if addr_info:
-            host_ip = addr_info[0][4][0]  # Get the IPv4 address
-        else:
-            host_ip = PGHOST
-    except (socket.gaierror, OSError):
-        # If resolution fails, use hostname directly
-        host_ip = PGHOST
+        # Get all address info and filter for IPv4 only
+        addr_info_list = socket.getaddrinfo(PGHOST, PGPORT, socket.AF_INET, socket.SOCK_STREAM)
+        if addr_info_list:
+            # Get the first IPv4 address
+            for addr_info in addr_info_list:
+                if addr_info[0] == socket.AF_INET:  # Ensure it's IPv4
+                    host_ip = addr_info[4][0]
+                    # Verify it's actually an IPv4 address
+                    try:
+                        ipaddress.IPv4Address(host_ip)
+                        break
+                    except ValueError:
+                        continue
+    except (socket.gaierror, OSError, ValueError):
+        # If resolution fails, try using the hostname with IPv4 socket option
+        pass
     
     # Build connection parameters
-    conn_params = {
-        'host': host_ip,
-        'port': PGPORT,
-        'dbname': PGDATABASE,
-        'user': PGUSER,
-        'password': PGPASSWORD,
-        'connect_timeout': 10,
-        'sslmode': PGSSLMODE if PGSSLMODE else 'require'
-    }
+    # Use connection string format which gives more control
+    conn_string = f"host={host_ip} port={PGPORT} dbname={PGDATABASE} user={PGUSER} password={PGPASSWORD} connect_timeout=10"
+    if PGSSLMODE:
+        conn_string += f" sslmode={PGSSLMODE}"
     
-    return psycopg2.connect(**conn_params)
+    # Try to connect with IPv4 preference
+    try:
+        return psycopg2.connect(conn_string)
+    except psycopg2.OperationalError as e:
+        # If direct connection fails, suggest using pooler
+        error_msg = str(e)
+        if "IPv6" in error_msg or "Cannot assign requested address" in error_msg:
+            # Try to construct pooler URL as fallback
+            # Supabase pooler format: aws-0-[region].pooler.supabase.com
+            if "supabase.co" in PGHOST:
+                # Extract region/project info and suggest pooler
+                st.warning("⚠️ Direct connection failed. Please use Supabase Connection Pooler instead.")
+                st.info("""
+                **To fix this:**
+                1. Go to Supabase Dashboard → Settings → Database
+                2. Scroll to "Connection string" section
+                3. Select **"Session pooler"** mode
+                4. Copy the connection string
+                5. Extract the host (e.g., `aws-0-us-east-1.pooler.supabase.com`)
+                6. Update your `.env` file:
+                   - `PGHOST=aws-0-[region].pooler.supabase.com`
+                   - `PGPORT=6543` (for Session pooler)
+                """)
+        raise
 
 @st.cache_data(ttl=5)  # Cache for 5 seconds
 def load_data():
