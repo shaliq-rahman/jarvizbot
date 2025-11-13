@@ -31,18 +31,38 @@ PGPASSWORD = os.getenv("PGPASSWORD")
 PGSSLMODE = os.getenv("PGSSLMODE", "require")
 
 def get_db_connection():
-    """Get a PostgreSQL database connection."""
+    """Get a PostgreSQL database connection with IPv4 and connection timeout."""
     if not all([PGHOST, PGDATABASE, PGUSER, PGPASSWORD]):
         raise ValueError(
             "Please set PGHOST, PGDATABASE, PGUSER, PGPASSWORD environment variables. "
             "Create a .env file or set them as environment variables."
         )
     
-    conn_string = f"host={PGHOST} port={PGPORT} dbname={PGDATABASE} user={PGUSER} password={PGPASSWORD}"
-    if PGSSLMODE == "require":
-        conn_string += " sslmode=require"
+    # Force IPv4 by resolving hostname to IPv4 address only
+    import socket
+    try:
+        # Get IPv4 address only (AF_INET = IPv4)
+        addr_info = socket.getaddrinfo(PGHOST, PGPORT, socket.AF_INET, socket.SOCK_STREAM)
+        if addr_info:
+            host_ip = addr_info[0][4][0]  # Get the IPv4 address
+        else:
+            host_ip = PGHOST
+    except (socket.gaierror, OSError):
+        # If resolution fails, use hostname directly
+        host_ip = PGHOST
     
-    return psycopg2.connect(conn_string)
+    # Build connection parameters
+    conn_params = {
+        'host': host_ip,
+        'port': PGPORT,
+        'dbname': PGDATABASE,
+        'user': PGUSER,
+        'password': PGPASSWORD,
+        'connect_timeout': 10,
+        'sslmode': PGSSLMODE if PGSSLMODE else 'require'
+    }
+    
+    return psycopg2.connect(**conn_params)
 
 @st.cache_data(ttl=5)  # Cache for 5 seconds
 def load_data():

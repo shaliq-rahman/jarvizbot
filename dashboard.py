@@ -32,18 +32,38 @@ PGPASSWORD = os.getenv("PGPASSWORD")
 PGSSLMODE = os.getenv("PGSSLMODE", "require")
 
 def get_db_connection():
-    """Get a PostgreSQL database connection."""
+    """Get a PostgreSQL database connection with IPv4 and connection timeout."""
     if not all([PGHOST, PGDATABASE, PGUSER, PGPASSWORD]):
         raise ValueError(
             "Please set PGHOST, PGDATABASE, PGUSER, PGPASSWORD environment variables. "
             "Create a .env file or set them as environment variables."
         )
     
-    conn_string = f"host={PGHOST} port={PGPORT} dbname={PGDATABASE} user={PGUSER} password={PGPASSWORD}"
-    if PGSSLMODE == "require":
-        conn_string += " sslmode=require"
+    # Force IPv4 by resolving hostname to IPv4 address only
+    import socket
+    try:
+        # Get IPv4 address only (AF_INET = IPv4)
+        addr_info = socket.getaddrinfo(PGHOST, PGPORT, socket.AF_INET, socket.SOCK_STREAM)
+        if addr_info:
+            host_ip = addr_info[0][4][0]  # Get the IPv4 address
+        else:
+            host_ip = PGHOST
+    except (socket.gaierror, OSError):
+        # If resolution fails, use hostname directly
+        host_ip = PGHOST
     
-    return psycopg2.connect(conn_string)
+    # Build connection parameters
+    conn_params = {
+        'host': host_ip,
+        'port': PGPORT,
+        'dbname': PGDATABASE,
+        'user': PGUSER,
+        'password': PGPASSWORD,
+        'connect_timeout': 10,
+        'sslmode': PGSSLMODE if PGSSLMODE else 'require'
+    }
+    
+    return psycopg2.connect(**conn_params)
 
 st.set_page_config(layout="wide")
 st.title("Expense Dashboard (Live)")
@@ -68,6 +88,14 @@ def load_data():
         if not df.empty and 'created_at' in df.columns:
             df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
         return df
+    except psycopg2.OperationalError as e:
+        error_msg = str(e)
+        if "IPv6" in error_msg or "Cannot assign requested address" in error_msg:
+            st.error(f"Connection error (IPv6 issue): {error_msg}")
+            st.info("💡 Tip: If using Supabase, try using the connection pooler URL instead of the direct connection URL. Check your Supabase dashboard > Settings > Database > Connection string > Session pooler")
+        else:
+            st.error(f"Database connection error: {error_msg}")
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"Error reading database: {e}")
         return pd.DataFrame()
