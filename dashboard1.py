@@ -1,36 +1,54 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+import psycopg2
+import os
 from datetime import datetime, date
 
-DB = "expenses.db"
+# Load .env file if it exists
+def load_env_file():
+    """Load environment variables from .env file if it exists."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and value:
+                        os.environ.setdefault(key, value)
 
-def init_db():
-    """Initialize the database and create the transactions table if it doesn't exist."""
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      category TEXT NOT NULL,
-      amount REAL NOT NULL,
-      currency TEXT DEFAULT 'INR',
-      date TEXT NOT NULL,
-      description TEXT,
-      tags TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    ''')
-    conn.commit()
-    conn.close()
+# Load .env file
+load_env_file()
 
-@st.cache_data
+# Database connection parameters
+PGHOST = os.getenv("PGHOST")
+PGPORT = int(os.getenv("PGPORT", "5432"))
+PGDATABASE = os.getenv("PGDATABASE")
+PGUSER = os.getenv("PGUSER")
+PGPASSWORD = os.getenv("PGPASSWORD")
+PGSSLMODE = os.getenv("PGSSLMODE", "require")
+
+def get_db_connection():
+    """Get a PostgreSQL database connection."""
+    if not all([PGHOST, PGDATABASE, PGUSER, PGPASSWORD]):
+        raise ValueError(
+            "Please set PGHOST, PGDATABASE, PGUSER, PGPASSWORD environment variables. "
+            "Create a .env file or set them as environment variables."
+        )
+    
+    conn_string = f"host={PGHOST} port={PGPORT} dbname={PGDATABASE} user={PGUSER} password={PGPASSWORD}"
+    if PGSSLMODE == "require":
+        conn_string += " sslmode=require"
+    
+    return psycopg2.connect(conn_string)
+
+@st.cache_data(ttl=5)  # Cache for 5 seconds
 def load_data():
-    # Initialize database if needed
-    init_db()
+    """Load data from PostgreSQL database."""
     try:
-        conn = sqlite3.connect(DB)
+        conn = get_db_connection()
         df = pd.read_sql_query("SELECT * FROM transactions ORDER BY date DESC", conn)
         conn.close()
         # Convert date columns to datetime
@@ -39,8 +57,8 @@ def load_data():
         if not df.empty and 'created_at' in df.columns:
             df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
         return df
-    except (sqlite3.OperationalError, pd.errors.DatabaseError) as e:
-        # Table doesn't exist or other database error
+    except Exception as e:
+        st.error(f"Error reading database: {e}")
         return pd.DataFrame()
 
 st.title("Expense Dashboard")
@@ -81,4 +99,3 @@ else:
     st.line_chart(daily.rename(columns={'date':'index'}).set_index('index')['amount'])
 
     st.download_button("Export CSV", filtered.to_csv(index=False), file_name="filtered_expenses.csv")
- 

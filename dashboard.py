@@ -1,64 +1,84 @@
-# dashboard_live.py — Streamlit auto-refresh when DB file changes
+# dashboard_live.py — Streamlit auto-refresh with PostgreSQL
 import streamlit as st
 import pandas as pd
-import sqlite3
+import psycopg2
 import os
 from datetime import date
 
-# Absolute path to DB in same folder as this file
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB = os.path.join(BASE_DIR, "expenses.db")
+# Load .env file if it exists
+def load_env_file():
+    """Load environment variables from .env file if it exists."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and value:
+                        os.environ.setdefault(key, value)
+
+# Load .env file
+load_env_file()
+
+# Database connection parameters
+PGHOST = os.getenv("PGHOST")
+PGPORT = int(os.getenv("PGPORT", "5432"))
+PGDATABASE = os.getenv("PGDATABASE")
+PGUSER = os.getenv("PGUSER")
+PGPASSWORD = os.getenv("PGPASSWORD")
+PGSSLMODE = os.getenv("PGSSLMODE", "require")
+
+def get_db_connection():
+    """Get a PostgreSQL database connection."""
+    if not all([PGHOST, PGDATABASE, PGUSER, PGPASSWORD]):
+        raise ValueError(
+            "Please set PGHOST, PGDATABASE, PGUSER, PGPASSWORD environment variables. "
+            "Create a .env file or set them as environment variables."
+        )
+    
+    conn_string = f"host={PGHOST} port={PGPORT} dbname={PGDATABASE} user={PGUSER} password={PGPASSWORD}"
+    if PGSSLMODE == "require":
+        conn_string += " sslmode=require"
+    
+    return psycopg2.connect(conn_string)
 
 st.set_page_config(layout="wide")
 st.title("Expense Dashboard (Live)")
 
 st.subheader("DB diagnostics")
-st.write("DB file path:", DB)
-exists = os.path.exists(DB)
-st.write("Exists:", exists)
-if exists:
-    st.write("Size (bytes):", os.path.getsize(DB))
-    st.write("Last modified (timestamp):", os.path.getmtime(DB))
-else:
-    st.warning("Database file not found. Make sure bot writes to this folder or update DB path.")
+st.write("Database:", PGDATABASE)
+st.write("Host:", PGHOST)
 
-def db_mtime(path):
-    try:
-        return os.path.getmtime(path)
-    except Exception:
-        return 0.0
-
-@st.cache_data
-def load_data_with_mtime(db_path, mtime):
+@st.cache_data(ttl=5)  # Cache for 5 seconds to allow refresh
+def load_data():
     """
-    Cache keyed by (db_path, mtime). When file mtime changes,
-    Streamlit will call this function again and return fresh data.
+    Load data from PostgreSQL database.
+    Cache refreshes every 5 seconds or when manually cleared.
     """
-    if not os.path.exists(db_path):
-        return pd.DataFrame()
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.execute('PRAGMA journal_mode=WAL;')
     try:
+        conn = get_db_connection()
         df = pd.read_sql_query("SELECT * FROM transactions ORDER BY id DESC", conn)
+        conn.close()
+        
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        if not df.empty and 'created_at' in df.columns:
+            df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+        return df
     except Exception as e:
-        st.error(f"Error reading DB: {e}")
-        df = pd.DataFrame()
-    conn.close()
-    if not df.empty and 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    if not df.empty and 'created_at' in df.columns:
-        df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
-    return df
+        st.error(f"Error reading database: {e}")
+        return pd.DataFrame()
 
-# Pass the current DB mtime as parameter to the cached loader
-current_mtime = db_mtime(DB)
-df = load_data_with_mtime(DB, current_mtime)
+df = load_data()
 
 st.markdown("---")
 if df.empty:
-    st.info("No transactions loaded from DB (empty DataFrame). If the bot is writing data, check DB path.")
+    st.info("No transactions loaded from database. If the bot is writing data, check database connection.")
 else:
-    st.success(f"Loaded {len(df)} rows from DB (mtime: {current_mtime}).")
+    st.success(f"Loaded {len(df)} rows from database.")
 
 st.subheader("Last 10 rows (raw)")
 if df.empty:
@@ -87,8 +107,8 @@ if not df.empty:
     with col2:
         if st.button("Refresh now"):
             # Force reload by clearing the cache entry and rerun
-            load_data_with_mtime.clear()
-            st.experimental_rerun()
+            load_data.clear()
+            st.rerun()
 
     st.subheader("Transactions")
     st.dataframe(filtered[['date','category','amount','description']].sort_values('date', ascending=False), height=400)
